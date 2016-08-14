@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 
 import sys
-from multiprocessing import Pool
+import os
+from multiprocessing import Pool, JoinableQueue, Process
+import itertools
+import threading
+import re
+import time
+from random import randint
 
 def Map(L):
   """
@@ -99,18 +105,166 @@ def tuple_sort(a, b):
   else:
     return cmp(a[0], b[0])
 
+########################################################
+
+
+
+
+class FolderTupleGenerator(object):
+  """
+  I instantiate an Iterator, which performs lazy evaluation
+  of the os.walk call on the concatenation of topfolders.
+  My 'next' nethod returns a tuple (path,dirlist,filelist)
+  for exactly one walked folder path.
+  """
+  def __init__(self,topfolders):
+    self.topfolders = topfolders
+    print("FolderTupleGenerator has topfolders %r" % (self.topfolders))
+    self.iterator = itertools.chain.from_iterable([os.walk(d) for d in topfolders])
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    return self.next()
+
+  def next(self):
+    try:
+      item = list(self.iterator.__next__())
+    except StopIteration:
+      # print("FolderTupleGenerator caught and re-raising StopIteration")
+      raise StopIteration
+    # print("FolderTupleGenerator.next -> %r" % (item))
+    return item
+
+
+class PathGenerator(object):
+  """
+  I instantiate an iterator, which performs lazy evaluation of
+  the os.walk call.
+  My 'next' method returns one full pathname from my current dtuple,
+  until it is exhausted, in which case I call foldertuplegenerator.next()
+  to obtain a new dtuple for the next folder in the os.walk.
+  """
+  def __init__(self,foldertuplegenerator):
+    self.foldertuplegenerator = foldertuplegenerator
+    self.dtuple = None
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    return self.next()
+
+  def next(self):
+    if self.dtuple is None or len(self.dtuple[2]) == 0:  # no paths left, get some more
+      # print("PathGenerator out of dtuple.filelist, obtain another")
+      try:
+        self.dtuple = self.foldertuplegenerator.next()
+      except StopIteration:
+        raise StopIteration
+   
+    filename = self.dtuple[2].pop()
+    pathname = os.path.join(self.dtuple[0],filename)
+    # print("PathGenerator -> %r" % (pathname))
+    return pathname
+
+
+class ChunkedPayloadGenerator(object):
+  """
+  I instantiate an Iterator, which performs lazy evaluation and assembly of
+  a 'payload', which is an enumerated (non-lazy) list of pathnames.
+  """
+
+  def __init__(self,payloadgenerator,payloadmax):
+    self.payloadgenerator = payloadgenerator
+    self.payloadmax        = payloadmax
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    return self.next()
+
+  def next(self):
+    payload = []
+    for n in range(self.payloadmax):
+      try:
+        item = self.payloadgenerator.next()
+        payload.append(item)
+        # print("ChunkedPayloadGenerator got %s, len(payload) is %s" % (item,len(payload)))
+      except StopIteration:
+        # print("ChunkedPayloadGenerator caught StopIteration, --> payload is %r" % (payload))
+        break
+    if len(payload) > 0:
+      return payload
+    else:
+      raise StopIteration
+
+
+
+
+def do_work(item):
+  print("Thread %r item %r started" % (threading.current_thread().name,item))
+  time.sleep(randint(1,5))
+  print("Thread %r item %r completed" % (threading.current_thread().name,item))
+
+
+def worker():
+  while True:
+    item = q.get()
+    if item is not None: do_work(item)
+    q.task_done()
+
+
+
 
 if __name__ == '__main__':
 
-  if (len(sys.argv) != 2):
-    print("Program requires path to file for reading!")
-    sys.exit(1)
-
-  # Load file, stuff it into a string
-  text = load (sys.argv[1])
-
   # Build a pool of 8 processes
   pool = Pool(processes=8,)
+
+  # Construct an interator for file-finding in the target_folders,
+  # returns a lazy list of pathnames.
+  target_folders = ['./testfolder1','testfolder2']
+  foldertuplegenerator = FolderTupleGenerator(target_folders)
+  pathgenerator = PathGenerator(foldertuplegenerator)
+  chunkedpayloadgenerator = ChunkedPayloadGenerator(pathgenerator,4)
+
+  for p in chunkedpayloadgenerator:
+    print("p is %r" % (p))
+
+
+
+  num_worker_threads = 5
+  num_worker_processes = 5
+
+  lorem =\
+"""
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Cras congue pharetra leo, dignissim gravida ipsum rhoncus in. 
+Integer diam felis, vulputate a nunc imperdiet, pretium vulputate felis. Donec euismod elit quam, 
+vel adipiscing enim molestie non. Vivamus molestie velit et nunc consectetur, nec volutpat ipsum aliquet. 
+Quisque rutrum lacus dictum, dignissim turpis consequat, facilisis justo. Proin hendrerit tellus a turpis accumsan, 
+quis mattis massa eleifend. Integer non consectetur metus.
+"""
+
+  q = JoinableQueue()
+  """
+  for i in range(num_worker_threads):
+    t = threading.Thread(target=worker,name="T%d" % (i))
+    t.daemon = True
+    t.start()
+  """
+  for i in range(num_worker_processes):
+    p = Process(target=worker,name="T%d" % (i),daemon=True)
+    p.start()
+
+  for word in re.split("[\s,.]+",lorem):
+    q.put(word)
+
+  q.join()       # block until all tasks are done
+
+  sys.exit(0)
 
   # Fragment the string data into 8 chunks
   partitioned_text = list(chunks(text, int(len(text) / 8)))
